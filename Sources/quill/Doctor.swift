@@ -77,7 +77,9 @@ enum DoctorReport {
     }
 
     /// Never discover a missing model after an important meeting: report
-    /// whether the parakeet models are already in FluidAudio's cache.
+    /// whether the configured engine's models are already on disk. Checking
+    /// the engine the config actually selects, so switching to whisper
+    /// doesn't leave doctor reporting on a parakeet cache nobody will use.
     static func checkTranscription() -> Check {
         guard Config.transcriptionEnabled() else {
             return Check(
@@ -86,14 +88,32 @@ enum DoctorReport {
                 remediation: nil
             )
         }
-        let cache = AsrModels.defaultCacheDirectory(for: .v2)
-        if AsrModels.modelsExist(at: cache, version: .v2) {
+        let downloadsOnFirstUse =
+            "downloads automatically on first transcription — record a short test session while online"
+
+        if Config.transcriptionEngine() == "whisper" {
+            let folder = WhisperEngine.modelStore
+                .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
+                .appendingPathComponent(WhisperEngine.whisperKitModel, isDirectory: true)
+            if FileManager.default.fileExists(atPath: folder.path) {
+                return Check(name: "transcription", status: .ok, remediation: nil)
+            }
+            return Check(
+                name: "transcription",
+                status: .warn("whisper model not downloaded (~1 GB)"),
+                remediation: downloadsOnFirstUse
+            )
+        }
+
+        let version = ParakeetEngine.configuredVersion()
+        let cache = AsrModels.defaultCacheDirectory(for: version)
+        if AsrModels.modelsExist(at: cache, version: version) {
             return Check(name: "transcription", status: .ok, remediation: nil)
         }
         return Check(
             name: "transcription",
             status: .warn("parakeet models not downloaded (~600 MB)"),
-            remediation: "downloads automatically on first transcription — record a short test session while online"
+            remediation: downloadsOnFirstUse
         )
     }
 

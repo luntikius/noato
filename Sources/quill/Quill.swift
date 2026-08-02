@@ -78,11 +78,18 @@ struct Doctor: ParsableCommand {
 /// ticker. All state transitions happen on the main actor.
 @MainActor
 final class AppController {
+    private enum RecordingOrigin: String {
+        case manual
+        case zoom = "Zoom auto"
+    }
+
     private let root: URL
     private let menuBar = MenuBarController()
     private let transcription = TranscriptionCoordinator()
     private var session: RecordingSession?
+    private var sessionOrigin: RecordingOrigin?
     private var ticker: Timer?
+    private var zoomMonitor: ZoomCallMonitor?
 
     init(root: URL) {
         self.root = root
@@ -90,6 +97,20 @@ final class AppController {
         menuBar.onOpenFolder = { [weak self] in self?.openFolder() }
         menuBar.onQuit = { [weak self] in self?.shutdown() }
         menuBar.update(recording: false, elapsed: nil)
+
+        if Config.zoomAutoRecordEnabled() {
+            let monitor = ZoomCallMonitor(
+                startDelay: Config.zoomAutoRecordStartDelay(),
+                stopDelay: Config.zoomAutoRecordStopDelay()
+            )
+            monitor.onCallStarted = { [weak self] in self?.zoomCallStarted() }
+            monitor.onCallStopped = { [weak self] in self?.zoomCallStopped() }
+            zoomMonitor = monitor
+            monitor.start()
+            FileHandle.standardError.write(Data(
+                "zoom auto-record enabled · start after \(Config.zoomAutoRecordStartDelay())s · stop after \(Config.zoomAutoRecordStopDelay())s\n".utf8
+            ))
+        }
 
         Task { [transcription, root] in
             await transcription.setStatusHandler { status in
@@ -103,24 +124,30 @@ final class AppController {
 
     /// Stop any live session cleanly (finalizing files) and exit.
     func shutdown() {
+        zoomMonitor?.stop()
         stopSession()
         NSApp.terminate(nil)
     }
 
     private func toggle() {
         if session == nil {
-            startSession()
+            startSession(origin: .manual)
         } else {
             stopSession()
         }
     }
 
-    private func startSession() {
+    private func startSession(origin: RecordingOrigin) {
+        guard session == nil else { return }
         do {
             let newSession = try RecordingSession(root: root)
             try newSession.start()
             session = newSession
-            FileHandle.standardError.write(Data("● recording → \(newSession.dir.path)\n".utf8))
+            sessionOrigin = origin
+            let source = origin == .manual ? "" : " (\(origin.rawValue))"
+            FileHandle.standardError.write(Data(
+                "● recording\(source) → \(newSession.dir.path)\n".utf8
+            ))
         } catch {
             FileHandle.standardError.write(Data("recording start failed: \(error)\n".utf8))
             notifyUser(title: "quill — recording failed", body: "\(error)")
@@ -141,12 +168,30 @@ final class AppController {
             "○ stopped · \(elapsed) · \(session.dir.path)\n".utf8
         ))
         self.session = nil
+        sessionOrigin = nil
         ticker?.invalidate()
         ticker = nil
         menuBar.update(recording: false, elapsed: nil)
 
         let dir = session.dir
         Task { [transcription] in await transcription.enqueue(dir) }
+    }
+
+    private func zoomCallStarted() {
+        guard session == nil else {
+            FileHandle.standardError.write(Data(
+                "zoom call detected · recording already active; leaving manual state unchanged\n".utf8
+            ))
+            return
+        }
+        FileHandle.standardError.write(Data("zoom call detected · starting recording\n".utf8))
+        startSession(origin: .zoom)
+    }
+
+    private func zoomCallStopped() {
+        guard sessionOrigin == .zoom else { return }
+        FileHandle.standardError.write(Data("zoom call ended · stopping automatic recording\n".utf8))
+        stopSession()
     }
 
     private func showTranscription(_ status: TranscriptionCoordinator.Status) {

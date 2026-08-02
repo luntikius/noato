@@ -4,7 +4,14 @@ import Foundation
 ///
 ///     {
 ///       "recordings_dir": "~/Recordings",
-///       "transcription": { "enabled": true, "engine": "parakeet" },
+///       "transcription": {
+///         "enabled": true, "engine": "parakeet", "model": "v3",
+///         "language": "pt", "silence_threshold_db": -34
+///       },
+///       "auto_record": {
+///         "zoom": true, "start_delay_seconds": 3,
+///         "stop_delay_seconds": 20
+///       },
 ///       "mic_voice_processing": true,
 ///       "on_stop": "my-hook"
 ///     }
@@ -38,14 +45,80 @@ enum Config {
         transcription()?["enabled"] as? Bool ?? true
     }
 
-    /// Configured engine name. Only "parakeet" ships today; the coordinator
-    /// warns and falls back for anything else.
+    /// Configured engine name: "parakeet" (default, fast) or "whisper"
+    /// (slower, more accurate). The coordinator warns and falls back to
+    /// parakeet for anything else.
     static func transcriptionEngine() -> String {
         transcription()?["engine"] as? String ?? "parakeet"
     }
 
+    /// Configured model for the engine, or nil when unset — each engine
+    /// applies its own default, so the key can't mean two things at once.
+    /// For parakeet: "v3" (multilingual, default) or "v2" (English-only,
+    /// marginally higher recall on English). Whisper ships one model,
+    /// "whisper-large-v3-turbo". Engines warn and fall back for anything they
+    /// don't recognize.
+    static func transcriptionModel() -> String? {
+        guard let model = transcription()?["model"] as? String, !model.isEmpty else { return nil }
+        return model
+    }
+
+    /// BCP-47-ish language code forced on engines that need one ("pt", "en",
+    /// "es"). Only whisper reads it — parakeet v3 detects the language itself.
+    /// Unset means whisper detects, which reads only the first window: a
+    /// meeting that opens in another language can mislabel the whole
+    /// transcript, so set this when you know the language.
+    static func transcriptionLanguage() -> String? {
+        guard let lang = transcription()?["language"] as? String, !lang.isEmpty else { return nil }
+        return lang
+    }
+
+    /// RMS level which Whisper treats as possible voice, in dBFS. Whisper's
+    /// own no-speech probability can be confidently wrong on silence, so the
+    /// engine also checks the actual waveform. A lower value keeps quieter
+    /// speech; a higher value suppresses more background noise. -34 dBFS is
+    /// WhisperKit's EnergyVAD default. Clamp extreme config values so a typo
+    /// cannot silently disable every transcript.
+    static func whisperSilenceThresholdDB() -> Float {
+        let configured = (transcription()?["silence_threshold_db"] as? NSNumber)?.floatValue
+            ?? -34
+        return min(max(configured, -80), -10)
+    }
+
     private static func transcription() -> [String: Any]? {
         load()?["transcription"] as? [String: Any]
+    }
+
+    /// Start and stop recordings from Zoom's Core Audio activity. Opt-in:
+    /// merely launching Zoom is not a call, so the monitor waits for Zoom to
+    /// begin audio IO before it changes recording state.
+    static func zoomAutoRecordEnabled() -> Bool {
+        autoRecord()?["zoom"] as? Bool ?? false
+    }
+
+    /// Continuous Zoom audio required before starting. A small debounce keeps
+    /// notification sounds and device reconfiguration from creating sessions.
+    static func zoomAutoRecordStartDelay() -> TimeInterval {
+        seconds(autoRecord()?["start_delay_seconds"], fallback: 3, range: 0...60)
+    }
+
+    /// How long Zoom may lose audio IO before an automatic recording stops.
+    /// This absorbs device switches and short reconnects during a live call.
+    static func zoomAutoRecordStopDelay() -> TimeInterval {
+        seconds(autoRecord()?["stop_delay_seconds"], fallback: 20, range: 1...300)
+    }
+
+    private static func autoRecord() -> [String: Any]? {
+        load()?["auto_record"] as? [String: Any]
+    }
+
+    private static func seconds(
+        _ value: Any?,
+        fallback: TimeInterval,
+        range: ClosedRange<TimeInterval>
+    ) -> TimeInterval {
+        let parsed = (value as? NSNumber)?.doubleValue ?? fallback
+        return min(max(parsed, range.lowerBound), range.upperBound)
     }
 
     /// Apple voice processing (acoustic echo cancellation) on the mic, so
