@@ -51,10 +51,11 @@ Each session lands in `~/Recordings/<yyyy.MM.dd-HHmm>/`:
 | `transcribe.log` | transcription progress/errors for this session |
 
 Two tracks on purpose: speech models do better on clean single-source audio,
-and mic-vs-system is free two-party diarization — `me` vs `them` with no
-speaker-identification model. CAF on purpose: unlike m4a, it needs no
-finalization pass — if the process dies mid-meeting, everything already
-written is still readable.
+and mic-vs-system gives a reliable first split — `me` vs the remote side.
+Optional speaker diarization can then split the system track into
+`participant_1`, `participant_2`, and so on. CAF on purpose: unlike m4a, it
+needs no finalization pass — if the process dies mid-meeting, everything
+already written is still readable.
 
 ## Transcription
 
@@ -100,6 +101,46 @@ timestamp tokens before writing the transcript. The energy threshold is
 configurable with `transcription.silence_threshold_db`; `quill doctor` checks
 that the model for the currently selected engine is already cached.
 
+## Speaker diarization and voice identification
+
+Opt-in, fully local diarization splits `system.caf` into remote speakers with
+FluidAudio's offline Pyannote Community-1 + WeSpeaker + VBx pipeline. Its Core
+ML models download on first use. Quill joins the resulting speaker timeline to
+ASR word timestamps, so a single long ASR segment can still become separate
+`participant_1` and `participant_2` utterances. The mic track remains `me`.
+
+Enable it with `diarization.enabled` in the config below. If model loading or
+diarization fails, transcription still completes with the legacy `them` label;
+speaker enrichment is never allowed to cost the recording itself.
+
+Quill can also match participant clusters against a user-labelled voiceprint
+library:
+
+```sh
+# Best: several clean samples from calls using the same audio path.
+quill voices enroll "Maria" maria-call-1.wav maria-call-2.wav
+
+# Or name a cluster after inspecting an existing transcript/session.
+quill voices label ~/Recordings/2026.08.03-1400 participant_2 "Maria"
+
+quill voices list
+quill voices remove "Maria"
+```
+
+Enrollment requires at least three seconds of detected speech and rejects a
+sample when several substantial voices are present. Multiple samples are
+combined into a profile centroid. At transcription time a name is accepted
+only when both its cosine-distance threshold and its lead over the second-best
+profile pass; otherwise the honest `participant_N` label stays in place.
+Predicted matches never update profiles automatically.
+
+Voiceprints are biometric data. Quill stores only 256-dimensional embeddings,
+not copied audio, in
+`~/Library/Application Support/quill/voiceprints.json`, written owner-only
+(`0600`). They never leave the machine and are deleted with `voices remove`.
+Overlapping speech is still mixed audio: diarization says who spoke when, but
+does not physically separate two simultaneous voices.
+
 ## Config
 
 Optional, at `~/.config/quill/config.json`:
@@ -110,6 +151,11 @@ Optional, at `~/.config/quill/config.json`:
   "transcription": {
     "enabled": true, "engine": "parakeet", "model": "v3",
     "language": "pt", "silence_threshold_db": -34
+  },
+  "diarization": {
+    "enabled": true, "identify_speakers": true,
+    "max_speakers": 8,
+    "match_threshold": 0.42, "match_margin": 0.08
   },
   "auto_record": {
     "zoom": true, "start_delay_seconds": 3, "stop_delay_seconds": 20
@@ -136,6 +182,19 @@ Optional, at `~/.config/quill/config.json`:
   Whisper hallucinations on silence (default `-34` dBFS). Use a lower value
   such as `-40` only if real quiet speech is being dropped; a higher value
   suppresses more background noise. Parakeet ignores this setting.
+- `diarization.enabled` — split remote system audio into `participant_N`
+  speakers (default off). The offline models download on first use.
+- `diarization.identify_speakers` — match clusters against the local voiceprint
+  library (default on; has no effect until profiles are enrolled).
+- `diarization.max_speakers` — expected upper bound for remote speakers,
+  clamped to 2–20 (default 8). Set it near the largest call you normally have:
+  a needlessly high cap can split one real voice into several clusters on a
+  long, noisy recording.
+- `diarization.match_threshold` — maximum cosine distance for accepting a
+  known voice (default `0.42`; lower is stricter).
+- `diarization.match_margin` — minimum lead over the second-best profile
+  (default `0.08`; higher is stricter). Tune thresholds against your own
+  validation calls rather than making them looser after a single miss.
 - `auto_record.zoom` — automatically start and stop recordings from Zoom's
   audio activity (default off). Manual recording always wins: quill never
   auto-stops a session that was started from the menu.
@@ -160,6 +219,11 @@ Optional, at `~/.config/quill/config.json`:
 quill                        # run the menu-bar daemon (^C to quit)
 quill run --out <dir>        # custom recordings root (default ~/Recordings)
 quill doctor                 # check permissions, recordings folder, models
+quill reprocess <session>    # regenerate an old transcript with current config
+quill voices enroll <name> <audio...>
+quill voices label <session-dir> <participant_N> <name>
+quill voices list
+quill voices remove <name-or-id>
 quill install --launch-at-login
 quill install --uninstall
 ```
@@ -174,6 +238,8 @@ quill install --uninstall
 - **AVAudioEngine** — mic capture
 - **AVAudioFile** — streaming AAC encode into CAF
 - **FluidAudio / Parakeet** — on-device Core ML transcription (default)
+- **FluidAudio / Pyannote Community-1 + WeSpeaker + VBx** — optional offline
+  speaker diarization and voice embeddings
 - **WhisperKit / Whisper large-v3-turbo** — on-device Core ML transcription
   (the accuracy option)
 - **NSStatusItem** — the whole UI
@@ -191,6 +257,14 @@ quill install --uninstall
 - Whisper's language detection reads only the first 30s window. Set
   `transcription.language` for any meeting that might not open in the language
   it's mostly conducted in.
+- Remote-speaker diarization sees the mixed `system.caf` track. It can label
+  sequential turns and detect overlaps, but ASR cannot reliably assign words
+  when two people speak on top of each other.
+- Diarization clusters are estimates, not identities. Long, noisy recordings
+  can over-split one person; keep `diarization.max_speakers` close to the
+  plausible participant count.
+- Voice identification is deliberately conservative. Use several samples from
+  different calls and keep `participant_N` when a match is ambiguous.
 - Zoom auto-record starts when Zoom connects to computer audio, not when the
   meeting window opens. Calls joined without computer audio are intentionally
   ignored.

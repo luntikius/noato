@@ -3,16 +3,16 @@ import ArgumentParser
 import Foundation
 
 @main
-struct Quill: ParsableCommand {
+struct Quill: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "quill",
         abstract: "Local meeting recorder + transcriber. Records mic and system audio as two tracks, then transcribes on-device.",
-        subcommands: [Run.self, Doctor.self, Install.self],
+        subcommands: [Run.self, Doctor.self, Reprocess.self, Install.self, Voices.self],
         defaultSubcommand: Run.self
     )
 }
 
-struct Run: ParsableCommand {
+struct Run: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "run",
         abstract: "Run the menu-bar daemon (default)."
@@ -21,10 +21,11 @@ struct Run: ParsableCommand {
     @Option(name: .long, help: "Recordings root directory (overrides the config file).")
     var out: String?
 
-    func run() throws {
-        // ArgumentParser invokes run() on the main thread; promote that fact
-        // to the type system so AppKit calls are cleanly isolated.
-        try MainActor.assumeIsolated { try runMain() }
+    mutating func run() async throws {
+        // The async root command may invoke subcommands from a cooperative
+        // executor. Hop explicitly to the main actor before touching AppKit;
+        // `assumeIsolated` traps when a LaunchAgent starts us off-main.
+        try await runMain()
     }
 
     @MainActor
@@ -74,6 +75,32 @@ struct Doctor: ParsableCommand {
     }
 }
 
+struct Reprocess: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Regenerate a finished session transcript with the current config."
+    )
+
+    @Argument(help: "Session directory containing meta.json and recorded audio.")
+    var session: String
+
+    mutating func run() async throws {
+        let dir = URL(
+            fileURLWithPath: (session as NSString).expandingTildeInPath,
+            isDirectory: true
+        )
+        guard FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("meta.json").path
+        ) else {
+            throw ValidationError("meta.json not found in \(dir.path)")
+        }
+        guard Config.transcriptionEnabled() else {
+            throw ValidationError("transcription is disabled in \(Config.path.path)")
+        }
+        try await TranscriptionCoordinator().processNow(dir)
+        print("✓ transcript regenerated: \(dir.path)")
+    }
+}
+
 /// Owns the menu bar, the current recording session, and the elapsed-time
 /// ticker. All state transitions happen on the main actor.
 @MainActor
@@ -112,10 +139,12 @@ final class AppController {
             ))
         }
 
-        Task { [transcription, root] in
+        BackgroundWork.start { [transcription, root] in
             await transcription.setStatusHandler { status in
-                Task { @MainActor [weak self] in
-                    self?.showTranscription(status)
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated {
+                        self?.showTranscription(status)
+                    }
                 }
             }
             await transcription.resumePending(root: root)
@@ -174,7 +203,9 @@ final class AppController {
         menuBar.update(recording: false, elapsed: nil)
 
         let dir = session.dir
-        Task { [transcription] in await transcription.enqueue(dir) }
+        BackgroundWork.start { [transcription] in
+            await transcription.enqueue(dir)
+        }
     }
 
     private func zoomCallStarted() {

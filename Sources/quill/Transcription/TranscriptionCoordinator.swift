@@ -17,6 +17,7 @@ actor TranscriptionCoordinator {
     private var queue: [URL] = []
     private var draining = false
     private var engine: TranscriptionEngine?
+    private var diarizer: SpeakerDiarizer?
     private var lastFailure: String?
     private var statusHandler: (@Sendable (Status) -> Void)?
 
@@ -62,6 +63,19 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
+    /// Regenerate one completed session from the CLI. This intentionally does
+    /// not invoke `on_stop`: reprocessing derived files must not duplicate an
+    /// upload, filing action, or downstream automation.
+    func processNow(_ sessionDir: URL) async throws {
+        do {
+            try await transcribe(sessionDir)
+            await releaseModels()
+        } catch {
+            await releaseModels()
+            throw error
+        }
+    }
+
     // MARK: -
 
     private func drainIfIdle() {
@@ -88,8 +102,7 @@ actor TranscriptionCoordinator {
                 )
             }
         }
-        await engine?.release()
-        engine = nil
+        await releaseModels()
         publish(lastFailure.map { .failed(session: $0) } ?? .idle)
         draining = false
         // An enqueue that landed between the loop exiting and the release
@@ -97,11 +110,20 @@ actor TranscriptionCoordinator {
         drainIfIdle()
     }
 
+    private func releaseModels() async {
+        await engine?.release()
+        engine = nil
+        // SpeakerDiarizer owns the Core ML model stack. Dropping it after the
+        // queue drains keeps quill's idle memory footprint small.
+        diarizer = nil
+    }
+
     private func transcribe(_ dir: URL) async throws {
         let meta = try SessionMeta.read(from: dir)
         let engine = try await preparedEngine()
 
         var merged: [Transcript.Segment] = []
+        var diarization: Transcript.Diarization?
         for track in meta.tracks {
             let audio = dir.appendingPathComponent(track.file)
             guard FileManager.default.fileExists(atPath: audio.path) else {
@@ -118,10 +140,29 @@ actor TranscriptionCoordinator {
                 log(dir, "skipping \(track.file): \(error)")
                 continue
             }
+            let attributed: [AttributedTranscriptSegment]
+            if track.speaker == "them", Config.diarizationEnabled(), !segments.isEmpty {
+                do {
+                    let result = try await diarize(segments, audio: audio, sessionDir: dir)
+                    attributed = result.segments
+                    diarization = result.info
+                } catch {
+                    // Diarization enriches a transcript; it must never be able
+                    // to destroy one. Preserve the old `them` output on any
+                    // model, audio, or voice-library failure.
+                    log(dir, "diarization failed — keeping them: \(error)")
+                    attributed = Self.unattributed(segments, speaker: track.speaker)
+                }
+            } else {
+                attributed = Self.unattributed(segments, speaker: track.speaker)
+            }
             let offset = TimeInterval(track.offsetMs) / 1000
-            merged += segments.map {
+            merged += attributed.map {
                 Transcript.Segment(
-                    speaker: track.speaker,
+                    speaker: $0.speaker,
+                    speaker_id: $0.speakerID,
+                    speaker_cluster: $0.clusterID,
+                    speaker_match: $0.match.map(Transcript.SpeakerMatch.init),
                     start_ms: Int(($0.start + offset) * 1000),
                     end_ms: Int(($0.end + offset) * 1000),
                     text: $0.text
@@ -134,6 +175,7 @@ actor TranscriptionCoordinator {
             engine: engine.name,
             model: engine.model,
             created_at: ISO8601DateFormatter().string(from: Date()),
+            diarization: diarization,
             segments: merged
         )
         try transcript.write(to: dir)
@@ -157,6 +199,80 @@ actor TranscriptionCoordinator {
         try await engine.prepare()
         self.engine = engine
         return engine
+    }
+
+    private func diarize(
+        _ segments: [TranscriptSegment],
+        audio: URL,
+        sessionDir: URL
+    ) async throws -> (segments: [AttributedTranscriptSegment], info: Transcript.Diarization?) {
+        let diarizer: SpeakerDiarizer
+        if let current = self.diarizer {
+            diarizer = current
+        } else {
+            let created = SpeakerDiarizer()
+            self.diarizer = created
+            diarizer = created
+        }
+
+        log(sessionDir, "diarizing \(audio.lastPathComponent) (\(SpeakerDiarizer.modelName))")
+        let snapshot = try await diarizer.process(audio)
+        guard !snapshot.turns.isEmpty else {
+            log(sessionDir, "diarization found no speaker turns — keeping them")
+            return (Self.unattributed(segments, speaker: "them"), nil)
+        }
+
+        var matches: [String: VoiceMatch] = [:]
+        if Config.speakerIdentificationEnabled() {
+            do {
+                let library = try VoiceProfileStore().load()
+                for (cluster, embedding) in snapshot.embeddings {
+                    matches[cluster] = VoiceMatcher.match(
+                        embedding: embedding,
+                        in: library,
+                        threshold: Config.voiceMatchThreshold(),
+                        margin: Config.voiceMatchMargin()
+                    )
+                }
+            } catch {
+                // A corrupt optional library should not disable anonymous
+                // participant diarization.
+                log(sessionDir, "voice identification skipped: \(error)")
+            }
+        }
+
+        let result = SpeakerAttribution.attribute(
+            segments,
+            turns: snapshot.turns,
+            matches: matches
+        )
+        let speakers = result.speakers.map(Transcript.Diarization.Speaker.init)
+        let identified = speakers.filter { $0.profile_id != nil }.count
+        log(
+            sessionDir,
+            "diarization done — \(speakers.count) participant(s), \(identified) identified"
+        )
+        return (
+            result.segments,
+            Transcript.Diarization(model: SpeakerDiarizer.modelName, speakers: speakers)
+        )
+    }
+
+    private static func unattributed(
+        _ segments: [TranscriptSegment],
+        speaker: String
+    ) -> [AttributedTranscriptSegment] {
+        segments.map {
+            AttributedTranscriptSegment(
+                speaker: speaker,
+                speakerID: nil,
+                clusterID: nil,
+                match: nil,
+                start: $0.start,
+                end: $0.end,
+                text: $0.text
+            )
+        }
     }
 
     /// Fires the configured on_stop shell command with the session directory
@@ -237,8 +353,46 @@ private struct SessionMeta {
 /// Canonical transcript. Property names are the JSON schema — this struct
 /// exists to be serialized.
 private struct Transcript: Codable {
+    struct SpeakerMatch: Codable {
+        let profile_id: String
+        let distance: Float
+        let margin: Float
+
+        init(_ match: VoiceMatch) {
+            profile_id = match.profileID
+            distance = match.distance
+            margin = match.margin
+        }
+    }
+
+    struct Diarization: Codable {
+        struct Speaker: Codable {
+            let id: String
+            let cluster_id: String
+            let label: String
+            let profile_id: String?
+            let match_distance: Float?
+            let match_margin: Float?
+
+            init(_ speaker: AttributedSpeaker) {
+                id = speaker.speakerID
+                cluster_id = speaker.clusterID
+                label = speaker.label
+                profile_id = speaker.match?.profileID
+                match_distance = speaker.match?.distance
+                match_margin = speaker.match?.margin
+            }
+        }
+
+        let model: String
+        let speakers: [Speaker]
+    }
+
     struct Segment: Codable {
         let speaker: String
+        let speaker_id: String?
+        let speaker_cluster: String?
+        let speaker_match: SpeakerMatch?
         let start_ms: Int
         let end_ms: Int
         let text: String
@@ -247,6 +401,7 @@ private struct Transcript: Codable {
     let engine: String
     let model: String
     let created_at: String
+    let diarization: Diarization?
     let segments: [Segment]
 
     /// Write transcript.json and render transcript.md. Both writes are atomic

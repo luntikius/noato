@@ -8,6 +8,13 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.0"),
         .package(url: "https://github.com/argmaxinc/WhisperKit.git", from: "0.18.0"),
+        // CommandLineTools does not bundle the Testing module. Pin it to the
+        // matching toolchain release so `swift test` also works without a full
+        // Xcode installation.
+        .package(
+            url: "https://github.com/swiftlang/swift-testing.git",
+            revision: "swift-6.2.3-RELEASE"
+        ),
     ],
     targets: [
         .executableTarget(
@@ -28,6 +35,13 @@ let package = Package(
                     "-Xlinker", "__info_plist",
                     "-Xlinker", "Sources/quill/Info.plist",
                 ]),
+            ]
+        ),
+        .testTarget(
+            name: "quillTests",
+            dependencies: [
+                "quill",
+                .product(name: "Testing", package: "swift-testing"),
             ]
         ),
     ]

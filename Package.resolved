@@ -1,5 +1,5 @@
 {
-  "originHash" : "75c0195970f99f6860b0cd13f8f217e8dd4cfbb054c30eb693dd315b0b363f41",
+  "originHash" : "42eaf3ee5f02f2b763f51363fd6ac3daae15738aa2f1f85fc11e6d49675ec93b",
   "pins" : [
     {
       "identity" : "fluidaudio",
@@ -53,6 +53,24 @@
       "state" : {
         "revision" : "7d0b8880ef8e567dd4e0089f8b99fb354129017c",
         "version" : "2.4.2"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax.git",
+      "state" : {
+        "revision" : "4799286537280063c85a32f09884cfbca301b1a1",
+        "version" : "602.0.0"
+      }
+    },
+    {
+      "identity" : "swift-testing",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-testing.git",
+      "state" : {
+        "branch" : "swift-6.2.3-RELEASE",
+        "revision" : "48a471ab313e858258ab0b9b0bf2cea55a50cefb"
       }
     },
     {

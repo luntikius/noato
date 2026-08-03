@@ -1,11 +1,33 @@
 import Foundation
 
+/// One recognized word with a track-relative time range. Diarization happens
+/// independently from ASR, so word timings are the join key between "what was
+/// said" and "who spoke when".
+struct TranscriptWord: Sendable, Equatable {
+    let start: TimeInterval
+    let end: TimeInterval
+    let text: String
+}
+
 /// One timed span of recognized speech from a single track, relative to that
 /// track's own start.
 struct TranscriptSegment: Sendable {
     let start: TimeInterval
     let end: TimeInterval
     let text: String
+    let words: [TranscriptWord]
+
+    init(
+        start: TimeInterval,
+        end: TimeInterval,
+        text: String,
+        words: [TranscriptWord] = []
+    ) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.words = words
+    }
 }
 
 /// A speech-to-text engine quill can run locally. Engines are prepared lazily
