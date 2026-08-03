@@ -16,12 +16,16 @@ struct Check {
 
 enum DoctorReport {
     static func run(recordingsRoot: URL) -> [Check] {
-        [
+        var checks = [
             checkMicrophone(),
             checkSystemAudio(),
             checkRecordingsRoot(recordingsRoot),
             checkTranscription(),
         ]
+        if Config.diarizationEnabled() {
+            checks.append(checkDiarization())
+        }
+        return checks
     }
 
     static func checkMicrophone() -> Check {
@@ -114,6 +118,29 @@ enum DoctorReport {
             name: "transcription",
             status: .warn("parakeet models not downloaded (~600 MB)"),
             remediation: downloadsOnFirstUse
+        )
+    }
+
+    static func checkDiarization() -> Check {
+        let root = OfflineDiarizerModels.defaultModelsDirectory()
+        let required = ModelNames.OfflineDiarizer.requiredModels
+        var found: Set<String> = []
+        if let enumerator = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for case let url as URL in enumerator where required.contains(url.lastPathComponent) {
+                found.insert(url.lastPathComponent)
+            }
+        }
+        if required.isSubset(of: found) {
+            return Check(name: "speaker diarization", status: .ok, remediation: nil)
+        }
+        return Check(
+            name: "speaker diarization",
+            status: .warn("models not downloaded"),
+            remediation: "downloads automatically on the first diarized recording or voices enroll"
         )
     }
 

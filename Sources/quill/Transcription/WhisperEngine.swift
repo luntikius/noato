@@ -126,7 +126,16 @@ actor WhisperEngine: TranscriptionEngine {
                 TranscriptSegment(
                     start: TimeInterval($0.start),
                     end: TimeInterval($0.end),
-                    text: Self.clean($0.text)
+                    text: Self.clean($0.text),
+                    words: ($0.words ?? []).compactMap { word in
+                        let text = Self.clean(word.word)
+                        guard !text.isEmpty else { return nil }
+                        return TranscriptWord(
+                            start: TimeInterval(word.start),
+                            end: TimeInterval(word.end),
+                            text: text
+                        )
+                    }
                 )
             }
             .filter { !$0.text.isEmpty }
@@ -151,12 +160,17 @@ actor WhisperEngine: TranscriptionEngine {
     /// language and guessing "en" would be worse.
     private static func decodingOptions() -> DecodingOptions {
         guard let language = Config.transcriptionLanguage() else {
-            return DecodingOptions(detectLanguage: true, skipSpecialTokens: true)
+            return DecodingOptions(
+                detectLanguage: true,
+                skipSpecialTokens: true,
+                wordTimestamps: true
+            )
         }
         return DecodingOptions(
             language: language,
             usePrefillPrompt: true,
-            skipSpecialTokens: true
+            skipSpecialTokens: true,
+            wordTimestamps: true
         )
     }
 

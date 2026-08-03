@@ -8,6 +8,11 @@ import Foundation
 ///         "enabled": true, "engine": "parakeet", "model": "v3",
 ///         "language": "pt", "silence_threshold_db": -34
 ///       },
+///       "diarization": {
+///         "enabled": false, "identify_speakers": true,
+///         "max_speakers": 8, "match_threshold": 0.42,
+///         "match_margin": 0.08
+///       },
 ///       "auto_record": {
 ///         "zoom": true, "start_delay_seconds": 3,
 ///         "stop_delay_seconds": 20
@@ -87,6 +92,46 @@ enum Config {
 
     private static func transcription() -> [String: Any]? {
         load()?["transcription"] as? [String: Any]
+    }
+
+    /// Split the system-audio track into stable participant clusters. Opt-in:
+    /// first use downloads the FluidAudio offline diarization models and adds
+    /// a second inference pass after ASR.
+    static func diarizationEnabled() -> Bool {
+        diarization()?["enabled"] as? Bool ?? false
+    }
+
+    /// Match diarized clusters against the local, user-labelled voiceprint
+    /// library. Unknown or ambiguous voices keep their participant_N label.
+    static func speakerIdentificationEnabled() -> Bool {
+        diarization()?["identify_speakers"] as? Bool ?? true
+    }
+
+    /// Defensive cap for accidental over-clustering. The offline pipeline can
+    /// infer the count itself; this only bounds the search space.
+    static func diarizationMaxSpeakers() -> Int {
+        let value = (diarization()?["max_speakers"] as? NSNumber)?.intValue ?? 8
+        return min(max(value, 2), 20)
+    }
+
+    /// Maximum cosine distance accepted as a known voice. This is deliberately
+    /// stricter than FluidAudio's within-recording clustering threshold: a
+    /// false name is worse than an honest participant_N.
+    static func voiceMatchThreshold() -> Float {
+        let value = (diarization()?["match_threshold"] as? NSNumber)?.floatValue ?? 0.42
+        return min(max(value, 0.05), 1.0)
+    }
+
+    /// Required separation between the best and second-best voice profiles.
+    /// It prevents two similar voices from being assigned on a weak nearest
+    /// neighbour win.
+    static func voiceMatchMargin() -> Float {
+        let value = (diarization()?["match_margin"] as? NSNumber)?.floatValue ?? 0.08
+        return min(max(value, 0), 0.5)
+    }
+
+    private static func diarization() -> [String: Any]? {
+        load()?["diarization"] as? [String: Any]
     }
 
     /// Start and stop recordings from Zoom's Core Audio activity. Opt-in:

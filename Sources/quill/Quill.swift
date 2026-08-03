@@ -3,11 +3,11 @@ import ArgumentParser
 import Foundation
 
 @main
-struct Quill: ParsableCommand {
+struct Quill: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "quill",
         abstract: "Local meeting recorder + transcriber. Records mic and system audio as two tracks, then transcribes on-device.",
-        subcommands: [Run.self, Doctor.self, Install.self],
+        subcommands: [Run.self, Doctor.self, Reprocess.self, Install.self, Voices.self],
         defaultSubcommand: Run.self
     )
 }
@@ -71,6 +71,32 @@ struct Doctor: ParsableCommand {
         if !DoctorReport.allOK(checks) {
             throw ExitCode(1)
         }
+    }
+}
+
+struct Reprocess: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        abstract: "Regenerate a finished session transcript with the current config."
+    )
+
+    @Argument(help: "Session directory containing meta.json and recorded audio.")
+    var session: String
+
+    mutating func run() async throws {
+        let dir = URL(
+            fileURLWithPath: (session as NSString).expandingTildeInPath,
+            isDirectory: true
+        )
+        guard FileManager.default.fileExists(
+            atPath: dir.appendingPathComponent("meta.json").path
+        ) else {
+            throw ValidationError("meta.json not found in \(dir.path)")
+        }
+        guard Config.transcriptionEnabled() else {
+            throw ValidationError("transcription is disabled in \(Config.path.path)")
+        }
+        try await TranscriptionCoordinator().processNow(dir)
+        print("✓ transcript regenerated: \(dir.path)")
     }
 }
 
