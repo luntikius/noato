@@ -12,7 +12,7 @@ struct Quill: AsyncParsableCommand {
     )
 }
 
-struct Run: ParsableCommand {
+struct Run: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "run",
         abstract: "Run the menu-bar daemon (default)."
@@ -21,10 +21,11 @@ struct Run: ParsableCommand {
     @Option(name: .long, help: "Recordings root directory (overrides the config file).")
     var out: String?
 
-    func run() throws {
-        // ArgumentParser invokes run() on the main thread; promote that fact
-        // to the type system so AppKit calls are cleanly isolated.
-        try MainActor.assumeIsolated { try runMain() }
+    mutating func run() async throws {
+        // The async root command may invoke subcommands from a cooperative
+        // executor. Hop explicitly to the main actor before touching AppKit;
+        // `assumeIsolated` traps when a LaunchAgent starts us off-main.
+        try await runMain()
     }
 
     @MainActor
