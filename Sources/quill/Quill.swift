@@ -139,10 +139,12 @@ final class AppController {
             ))
         }
 
-        Task { [transcription, root] in
+        BackgroundWork.start { [transcription, root] in
             await transcription.setStatusHandler { status in
-                Task { @MainActor [weak self] in
-                    self?.showTranscription(status)
+                DispatchQueue.main.async { [weak self] in
+                    MainActor.assumeIsolated {
+                        self?.showTranscription(status)
+                    }
                 }
             }
             await transcription.resumePending(root: root)
@@ -201,7 +203,9 @@ final class AppController {
         menuBar.update(recording: false, elapsed: nil)
 
         let dir = session.dir
-        Task { [transcription] in await transcription.enqueue(dir) }
+        BackgroundWork.start { [transcription] in
+            await transcription.enqueue(dir)
+        }
     }
 
     private func zoomCallStarted() {
