@@ -7,7 +7,6 @@ jobs:
     runs-on: macos-15
     env:
       DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
-      NOATO_DATA_DIR: ${{ runner.temp }}/noato-test-state
     steps:
       - uses: actions/checkout@v4
       - name: Check environment
@@ -15,6 +14,8 @@ jobs:
           uname -m
           xcrun swift --version
       - name: Unit tests
+        env:
+          NOATO_DATA_DIR: ${{ runner.temp }}/noato-test-state
         run: swift test --disable-automatic-resolution
       - name: Build and verify app
         run: ./scripts/build-app.sh
