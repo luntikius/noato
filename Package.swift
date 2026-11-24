@@ -2,8 +2,10 @@
 import PackageDescription
 
 let package = Package(
-    name: "quill",
+    name: "noato",
+    defaultLocalization: "en",
     platforms: [.macOS(.v15)],
+    products: [.executable(name: "noato", targets: ["quill"])],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.0"),
@@ -25,6 +27,7 @@ let package = Package(
                 .product(name: "WhisperKit", package: "WhisperKit"),
             ],
             exclude: ["Info.plist"],
+            resources: [.process("Resources")],
             linkerSettings: [
                 // Embed Info.plist into the binary so TCC can attribute the
                 // system-audio-capture permission to quill itself when it

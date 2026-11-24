@@ -61,7 +61,7 @@ actor ParakeetEngine: TranscriptionEngine {
         self.manager = manager
     }
 
-    func transcribe(_ audio: URL) async throws -> [TranscriptSegment] {
+    func transcribe(_ audio: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws -> [TranscriptSegment] {
         guard let manager else { throw EngineError.notPrepared }
 
         // A track with no frames (recorder died before its first buffer)
@@ -80,6 +80,7 @@ actor ParakeetEngine: TranscriptionEngine {
         var state = try TdtDecoderState()
         let result = try await manager.transcribe(audio, decoderState: &state)
 
+        progress?(1)
         let words = buildWordTimings(from: result.tokenTimings ?? [])
         guard !words.isEmpty else {
             let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)

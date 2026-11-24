@@ -34,11 +34,17 @@ struct TranscriptSegment: Sendable {
 /// (model download + load) when the transcription queue has work and released
 /// when it drains, so quill never idles holding gigabytes of model weights.
 protocol TranscriptionEngine: Sendable {
-    /// Short engine identifier recorded as transcript.json provenance.
+    /// Short engine identifier recorded in Markdown.
     var name: String { get }
-    /// Concrete model identifier recorded as transcript.json provenance.
+    /// Concrete model identifier recorded in Markdown.
     var model: String { get }
     func prepare() async throws
-    func transcribe(_ audio: URL) async throws -> [TranscriptSegment]
+    func transcribe(_ audio: URL, progress: (@Sendable (Double) -> Void)?) async throws -> [TranscriptSegment]
     func release() async
+}
+
+extension TranscriptionEngine {
+    func transcribe(_ audio: URL) async throws -> [TranscriptSegment] {
+        try await transcribe(audio, progress: nil)
+    }
 }

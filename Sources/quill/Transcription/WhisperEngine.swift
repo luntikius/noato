@@ -28,13 +28,28 @@ actor WhisperEngine: TranscriptionEngine {
     /// Core ML's mmap of an evicted weight file then blocks forever; and it's
     /// TCC-protected, so a LaunchAgent with no UI can't prompt its way in.
     /// Application Support is neither, and is tidy to uninstall.
-    static let modelStore = FileManager.default
-        .homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/quill/models", isDirectory: true)
+    static let modelStore: URL = {
+        if let path = ProcessInfo.processInfo.environment["NOATO_MODEL_DIR"] { return URL(fileURLWithPath: path) }
+        let legacy = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/quill/models")
+        if ProcessInfo.processInfo.environment["NOATO_DATA_DIR"] == nil,
+           FileManager.default.fileExists(atPath: legacy.path) { return legacy }
+        return Config.dataRoot.appendingPathComponent("models")
+    }()
 
     /// WhisperKit's own repo identifier for the model, distinct from the name
     /// recorded as transcript provenance.
     static let whisperKitModel = "openai_whisper-large-v3-v20240930_turbo"
+
+    static let modelDirectory = modelStore
+        .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
+        .appendingPathComponent(whisperKitModel, isDirectory: true)
+
+    static var modelsCached: Bool {
+        ["MelSpectrogram", "AudioEncoder", "TextDecoder"].allSatisfy {
+            FileManager.default.fileExists(atPath: modelDirectory
+                .appendingPathComponent($0 + ".mlmodelc/coremldata.bin").path)
+        }
+    }
 
     nonisolated let name = "whisper"
     nonisolated let model = "whisper-large-v3-turbo"
@@ -52,17 +67,22 @@ actor WhisperEngine: TranscriptionEngine {
 
     func prepare() async throws {
         guard pipeline == nil else { return }
+        // A complete local model must not require Hub metadata/network access
+        // on each meeting. WhisperKit validates the model contents on load.
+        let cached = Self.modelsCached
         let config = WhisperKitConfig(
             model: Self.whisperKitModel,
             downloadBase: Self.modelStore,
+            modelFolder: cached ? Self.modelDirectory.path : nil,
             verbose: false,
             prewarm: true,
-            load: true
+            load: true,
+            download: !cached
         )
         pipeline = Pipeline(kit: try await WhisperKit(config))
     }
 
-    func transcribe(_ audio: URL) async throws -> [TranscriptSegment] {
+    func transcribe(_ audio: URL, progress: (@Sendable (Double) -> Void)? = nil) async throws -> [TranscriptSegment] {
         guard let pipeline else { throw EngineError.notPrepared }
 
         // A track with no frames (recorder died before its first buffer)
@@ -91,18 +111,30 @@ actor WhisperEngine: TranscriptionEngine {
             throw EngineError.unreadableAudio(audio, error)
         }
 
+        var signal = AudioSignalAccumulator()
+        samples.withUnsafeBufferPointer { signal.observe($0, sampleRate: 16000) }
+        let health = signal.report
+        Self.log("whisper signal \(audio.lastPathComponent): peak=\(health.peak_db)dB max100ms=\(health.max_window_rms_db)dB threshold=\(Config.whisperSilenceThresholdDB())dB")
         let detector = EnergyVAD(energyThreshold: Self.silenceThreshold())
         let voiceActivity = detector.voiceActivity(in: samples)
         guard voiceActivity.contains(true) else {
             Self.log("whisper: skipped silent track \(audio.lastPathComponent)")
+            progress?(1)
             return []
         }
 
+        // Capture this object: WhisperKit replaces its root Progress at completion.
+        let trackProgress = pipeline.kit.progress
+        let observation = trackProgress.observe(\.fractionCompleted, options: [.new]) { value, _ in
+            progress?(value.fractionCompleted)
+        }
+        defer { observation.invalidate() }
         let results = try await pipeline.kit.transcribe(
             audioArray: samples,
             decodeOptions: Self.decodingOptions()
         )
 
+        progress?(1)
         let rawSegments = results.flatMap(\.segments)
         let keptSegments = rawSegments.filter {
             Self.hasVoice(

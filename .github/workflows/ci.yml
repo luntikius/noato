@@ -1,0 +1,24 @@
+name: Validate noato
+on: [push, pull_request, workflow_dispatch]
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-15
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.2.app/Contents/Developer
+      NOATO_DATA_DIR: ${{ runner.temp }}/noato-test-state
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check environment
+        run: |
+          uname -m
+          xcrun swift --version
+      - name: Unit tests
+        run: swift test --disable-automatic-resolution
+      - name: Build and verify app
+        run: ./scripts/build-app.sh
+      - name: Check packaged CLI and resources
+        run: |
+          dist/noato.app/Contents/MacOS/noato --help
+          codesign --verify --deep --strict dist/noato.app

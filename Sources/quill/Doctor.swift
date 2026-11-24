@@ -43,7 +43,7 @@ enum DoctorReport {
             return Check(
                 name: "microphone",
                 status: .fail("denied"),
-                remediation: "System Settings → Privacy & Security → Microphone → enable for quill (or your terminal)"
+                remediation: "System Settings → Privacy & Security → Microphone → enable for noato (or your terminal)"
             )
         @unknown default:
             return Check(name: "microphone", status: .fail("unknown state"), remediation: nil)
@@ -96,10 +96,7 @@ enum DoctorReport {
             "downloads automatically on first transcription — record a short test session while online"
 
         if Config.transcriptionEngine() == "whisper" {
-            let folder = WhisperEngine.modelStore
-                .appendingPathComponent("models/argmaxinc/whisperkit-coreml", isDirectory: true)
-                .appendingPathComponent(WhisperEngine.whisperKitModel, isDirectory: true)
-            if FileManager.default.fileExists(atPath: folder.path) {
+            if WhisperEngine.modelsCached {
                 return Check(name: "transcription", status: .ok, remediation: nil)
             }
             return Check(

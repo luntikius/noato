@@ -35,9 +35,13 @@ actor SpeakerDiarizer {
         self.maxSpeakers = min(max(maxSpeakers, 2), 20)
     }
 
-    func process(_ audio: URL) async throws -> SpeakerDiarizationSnapshot {
+    func prepare() async throws {
+        _ = try await preparedManager()
+    }
+
+    func process(_ audio: URL, progress: (@Sendable (Int, Int) -> Void)? = nil) async throws -> SpeakerDiarizationSnapshot {
         let manager = try await preparedManager()
-        let result = try await manager.value.process(audio)
+        let result = try await manager.value.process(audio, progressCallback: progress)
 
         var turns: [SpeakerTurn] = []
         for segment in result.segments where segment.endTimeSeconds > segment.startTimeSeconds {

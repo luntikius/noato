@@ -2,7 +2,7 @@ import AVFoundation
 import CoreAudio
 import Foundation
 
-/// Records all system audio output to a file via a Core Audio process tap
+/// Records system or selected application output via a Core Audio process tap
 /// (macOS 14.2+). No virtual device, no kernel extension — the tap mixes every
 /// process's output to stereo and hands us buffers through a private aggregate
 /// device. First use triggers the one-time "System Audio Recording" TCC prompt
@@ -15,6 +15,7 @@ final class SystemAudioRecorder {
         case ioProcCreationFailed(OSStatus)
         case deviceStartFailed(OSStatus)
         case fileCreationFailed(Error)
+        case tapUpdateFailed(OSStatus)
 
         var description: String {
             switch self {
@@ -25,6 +26,7 @@ final class SystemAudioRecorder {
             case .ioProcCreationFailed(let s): return "IO proc creation failed (OSStatus \(s))"
             case .deviceStartFailed(let s): return "device start failed (OSStatus \(s))"
             case .fileCreationFailed(let e): return "output file creation failed: \(e)"
+            case .tapUpdateFailed(let s): return "process tap update failed (OSStatus \(s))"
             }
         }
     }
@@ -33,6 +35,8 @@ final class SystemAudioRecorder {
     private var aggregateID = AudioObjectID(kAudioObjectUnknown)
     private var procID: AudioDeviceIOProcID?
     private var file: AVAudioFile?
+    private var tapDescription: CATapDescription?
+    private var capturedProcessIDs: [AudioObjectID]?
     private let queue = DispatchQueue(label: "com.digimata.quill.system-tap")
     private(set) var isRecording = false
     /// Wall-clock time of the first captured buffer — the track's true start,
@@ -42,10 +46,14 @@ final class SystemAudioRecorder {
     /// Start capturing system audio, encoding AAC into `url` (use a .caf
     /// extension — CAF needs no finalization pass, so a crash mid-meeting
     /// loses nothing already written).
-    func start(writingTo url: URL) throws {
+    func start(writingTo url: URL, processIDs: [AudioObjectID]? = nil) throws {
         guard !isRecording else { return }
 
-        let description = CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        // nil explicitly means global capture; an empty list stays an
+        // inclusive tap and must never become global capture.
+        let description = Self.tapDescription(processIDs: processIDs)
+        tapDescription = description
+        capturedProcessIDs = processIDs
         description.name = "quill system tap"
         description.isPrivate = true
         description.muteBehavior = .unmuted
@@ -66,6 +74,55 @@ final class SystemAudioRecorder {
         }
 
         isRecording = true
+    }
+
+    static func tapDescription(processIDs: [AudioObjectID]?) -> CATapDescription {
+        let description = processIDs.map { CATapDescription(stereoMixdownOfProcesses: $0) }
+            ?? CATapDescription(stereoGlobalTapButExcludeProcesses: [])
+        if #available(macOS 26.0, *), processIDs != nil {
+            // We verify concrete processes ourselves. Do not let the OS
+            // restore a generic Qt helper by its shared bundle identifier.
+            description.bundleIDs = []
+            description.isProcessRestoreEnabled = false
+        }
+        return description
+    }
+
+    /// Update the inclusive tap without replacing the file or its time base.
+    func updateProcesses(_ processIDs: [AudioObjectID]) throws {
+        guard isRecording, capturedProcessIDs != nil,
+              capturedProcessIDs != processIDs, let description = tapDescription else { return }
+        try Self.setProcesses(processIDs, description: description, tapID: tapID)
+        capturedProcessIDs = processIDs
+    }
+
+    /// Exercise permission and inclusive-tap updates without starting IO,
+    /// opening audio files or recording a microphone/call.
+    static func checkProcessTap(processIDs: [AudioObjectID]) throws {
+        let description = tapDescription(processIDs: processIDs)
+        description.isPrivate = true
+        description.muteBehavior = .unmuted
+        var tapID = AudioObjectID(kAudioObjectUnknown)
+        let status = AudioHardwareCreateProcessTap(description, &tapID)
+        guard status == noErr else { throw RecorderError.tapCreationFailed(status) }
+        defer { AudioHardwareDestroyProcessTap(tapID) }
+        try setProcesses([], description: description, tapID: tapID)
+        try setProcesses(processIDs, description: description, tapID: tapID)
+    }
+
+    private static func setProcesses(
+        _ processIDs: [AudioObjectID], description: CATapDescription, tapID: AudioObjectID
+    ) throws {
+        description.processes = processIDs
+        var value = Unmanaged.passUnretained(description)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioTapPropertyDescription,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectSetPropertyData(
+            tapID, &address, 0, nil, UInt32(MemoryLayout<Unmanaged<CATapDescription>>.size), &value
+        )
+        guard status == noErr else { throw RecorderError.tapUpdateFailed(status) }
     }
 
     /// Stop capturing and finalize the file. Idempotent.
@@ -170,5 +227,7 @@ final class SystemAudioRecorder {
             tapID = AudioObjectID(kAudioObjectUnknown)
         }
         file = nil
+        tapDescription = nil
+        capturedProcessIDs = nil
     }
 }
